@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Ollama Agent</title>
+<style>
+:root{--bg:#0f1115;--fg:#e8eaed;--mut:#8b93a1;--card:#1a1d24;--acc:#7c9cff;--bd:#2a2f3a;color-scheme:dark}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
+header{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--bd)}
+header h1{font-size:16px;margin:0;flex:1}
+button{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:10px;padding:8px 12px;font:inherit}
+button.p{background:var(--acc);color:#000;border:0;font-weight:600}
+button:disabled{opacity:.5}
+#log{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+.m{max-width:92%;padding:10px 12px;border-radius:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+.u{align-self:flex-end;background:var(--acc);color:#000}
+.a{align-self:flex-start;background:var(--card)}
+.t{align-self:flex-start;font-size:12px;color:var(--mut);border:1px dashed var(--bd);border-radius:10px;padding:6px 10px;overflow-wrap:anywhere}
+pre{white-space:pre;overflow-x:auto;background:#0b0d11;padding:8px;border-radius:8px;margin:6px 0}
+code{background:#0b0d11;padding:1px 4px;border-radius:4px}
+footer{display:flex;gap:8px;align-items:flex-end;padding:8px 12px calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--bd)}
+textarea,input,select{width:100%;background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:10px;padding:10px;font:inherit}
+footer textarea{resize:none;max-height:120px}
+.pn{position:fixed;inset:0;background:var(--bg);overflow-y:auto;padding:calc(12px + env(safe-area-inset-top)) 14px 28px;display:none;z-index:5}
+.pn.on{display:block}
+.pn h2{font-size:17px;margin:0 0 6px}
+.pn label{display:block;margin:14px 0 4px;color:var(--mut);font-size:13px}
+.row{display:flex;gap:8px;margin-top:8px}
+.sk{display:flex;gap:8px;align-items:center;padding:10px;border:1px solid var(--bd);border-radius:10px;margin-top:8px;background:var(--card)}
+.sk div{flex:1;min-width:0}.sk small{color:var(--mut);display:block;overflow-wrap:anywhere}
+#toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#000c;padding:8px 14px;border-radius:20px;display:none;z-index:9;max-width:90%}
+</style></head><body>
+<header><h1>🤖 Ollama Agent</h1><button id="bsk">Skills</button><button id="bset">⚙</button><button id="bclr">New</button></header>
+<div id="log"></div>
+<footer><textarea id="in" rows="1" placeholder="Message…"></textarea><button class="p" id="send">Send</button></footer>
+
+<div class="pn" id="pn-set">
+<h2>Settings</h2>
+<label>Ollama URL (your PC/server IP, or 127.0.0.1 if Ollama runs on this phone)</label>
+<input id="c-url" inputmode="url" autocapitalize="off" autocorrect="off">
+<label>Model</label>
+<div class="row"><select id="c-model"></select><button id="c-ref">Load</button></div>
+<label>Max agent steps</label><input id="c-steps" type="number" min="1" max="30">
+<label>System prompt</label><textarea id="c-sys" rows="5"></textarea>
+<div class="row"><button class="p" id="c-save">Save</button><button id="c-close">Close</button></div>
+</div>
+
+<div class="pn" id="pn-sk">
+<h2>Skills</h2>
+<label>Download from URL (GitHub links ok; SKILL.md or any .md/.txt)</label>
+<input id="s-url" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="https://github.com/…/SKILL.md">
+<div class="row"><button class="p" id="s-add">Download</button><button id="s-upd">Update all</button></div>
+<label>Or paste a skill</label>
+<textarea id="s-txt" rows="5" placeholder="---&#10;name: my-skill&#10;description: when to use it&#10;---&#10;Instructions…"></textarea>
+<div class="row"><button id="s-paste">Add pasted</button><button id="s-close">Close</button></div>
+<div id="s-list"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const LS=(k,d)=>{try{const v=JSON.parse(localStorage.getItem(k));return v==null?d:v}catch(e){return d}};
+const save=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){toast('Storage full')}};
+const esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const md=s=>esc(s).replace(/```\w*\n?([\s\S]*?)(```|$)/g,'<pre>$1</pre>').replace(/`([^`\n]+)`/g,'<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
+function toast(t){const e=$('#toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',2800)}
+
+let cfg=Object.assign({url:'http://127.0.0.1:11434',model:'',steps:8,
+ sys:"You are a capable personal assistant agent running on the user's phone. Be concise and accurate. Use tools when they help. If an installed skill matches the task, load it with use_skill and follow it."},LS('cfg',{}));
+let skills=LS('skills',[]),notes=LS('notes',[]),hist=LS('hist',[]);
+let busy=false,curId=null,stopped=false,noTools=false;
+const base=()=>cfg.url.trim().replace(/\/+$/,'');
+const rawUrl=u=>u.trim().replace(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/(.+)$/,'https://raw.githubusercontent.com/$1/$2/$3');
+
+/* ---- native HTTP bridge (no CORS issues) ---- */
+const pending={};
+window.__native=(id,type,data)=>{const f=pending[id];if(f)f(type,data)};
+function req(method,url,body,onLine){
+ return new Promise((res,rej)=>{
+  if(!window.Native)return rej(new Error('Native bridge missing'));
+  const id=Math.random().toString(36).slice(2);let status=0;const buf=[];curId=id;
+  pending[id]=(t,d)=>{
+   if(t==='status')status=+d;
+   else if(t==='line'){if(onLine&&status<400){try{onLine(d)}catch(e){}}else buf.push(d)}
+   else if(t==='end'){delete pending[id];status>=400?rej(new Error('HTTP '+status+': '+buf.join('\n').slice(0,300))):res(buf.join('\n'))}
+   else if(t==='error'){delete pending[id];rej(new Error(d))}
+  };
+  Native.request(id,method,url,body||'',JSON.stringify({'Content-Type':'application/json','User-Agent':'OllamaAgent/1.0'}));
+ });
+}
+
+/* ---- skills ---- */
+function parseSkill(t,url){
+ let name='',desc='',body=t;
+ const m=t.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+ if(m){const n=m[1].match(/^name:\s*(.+)$/m),d=m[1].match(/^description:\s*(.+)$/m);
+  if(n)name=n[1].trim().replace(/^["']|["']$/g,'');if(d)desc=d[1].trim().replace(/^["']|["']$/g,'');body=m[2]}
+ if(!name&&url){const p=url.split(/[?#]/)[0].split('/').filter(Boolean);let b=p.pop()||'';
+  if(/^skill\.\w+$/i.test(b))b=p.pop()||b;try{b=decodeURIComponent(b)}catch(e){}name=b.replace(/\.\w+$/,'')}
+ if(!name)name='skill-'+(skills.length+1);
+ name=name.toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'')||'skill';
+ if(!desc){const l=body.split('\n').find(x=>x.trim()&&!x.trim().startsWith('#'));desc=l?l.trim().slice(0,160):''}
+ return {name,description:desc,body:body.trim(),url:url||'',on:true};
+}
+function upsert(s){const i=skills.findIndex(x=>x.name===s.name);if(i>=0){s.on=skills[i].on;skills[i]=s}else skills.push(s);save('skills',skills);renderSkills()}
+async function addUrl(){
+ const u=$('#s-url').value.trim();if(!/^https?:\/\//i.test(u))return toast('Enter a valid http(s) URL');
+ try{toast('Downloading…');const t=await req('GET',rawUrl(u));if(!t.trim())throw new Error('Empty file');upsert(parseSkill(t,u));$('#s-url').value='';toast('Skill added')}
+ catch(e){toast('Failed: '+e.message)}
+}
+async function updAll(){
+ let n=0;for(const s of skills.filter(x=>x.url)){try{const t=await req('GET',rawUrl(s.url));const k=parseSkill(t,s.url);k.name=s.name;upsert(k);n++}catch(e){}}
+ toast('Updated '+n+' skill(s)');
+}
+function renderSkills(){
+ const l=$('#s-list');l.innerHTML='';
+ if(!skills.length){l.innerHTML='<p style="color:var(--mut)">No skills installed.</p>';return}
+ skills.forEach((s,i)=>{
+  const d=document.createElement('div');d.className='sk';
+  const c=document.createElement('input');c.type='checkbox';c.checked=s.on;c.style.width='auto';
+  c.onchange=()=>{s.on=c.checked;save('skills',skills)};
+  const m=document.createElement('div');const b=document.createElement('b');b.textContent=s.name;
+  const sm=document.createElement('small');sm.textContent=s.description;m.append(b,sm);
+  const x=document.createElement('button');x.textContent='✕';x.onclick=()=>{skills.splice(i,1);save('skills',skills);renderSkills()};
+  d.append(c,m,x);l.append(d);
+ });
+}
+
+/* ---- tools ---- */
+const fn=(name,description,props,req)=>({type:'function',function:{name,description,parameters:{type:'object',properties:props||{},required:req||[]}}});
+const TOOLS=[
+ fn('get_time','Get the current local date and time'),
+ fn('calculate','Evaluate an arithmetic expression, e.g. (3+4)*2^3',{expression:{type:'string'}},['expression']),
+ fn('fetch_url','Download a web page or text file and return its text',{url:{type:'string'}},['url']),
+ fn('use_skill','Load the full instructions of an installed skill by name',{name:{type:'string'}},['name']),
+ fn('save_note','Save a short note to persistent memory',{text:{type:'string'}},['text']),
+ fn('read_notes','Read all saved notes')
+];
+async function exec(name,a){
+ a=a||{};
+ try{switch(name){
+  case 'get_time':return new Date().toString();
+  case 'calculate':{const e=String(a.expression||'').replace(/\^/g,'**');
+   if(!e.trim()||!/^[\d\s+\-*/%().eE]*$/.test(e))return 'Error: invalid expression';
+   return String(Function('"use strict";return ('+e+')')())}
+  case 'fetch_url':{if(!/^https?:\/\//i.test(a.url||''))return 'Error: URL must start with http(s)://';
+   let t=await req('GET',rawUrl(a.url));
+   if(/<html|<body|<!doctype/i.test(t.slice(0,800))){const d=new DOMParser().parseFromString(t,'text/html');
+    d.querySelectorAll('script,style,noscript,svg').forEach(n=>n.remove());if(d.body)t=d.body.textContent}
+   return t.replace(/[ \t]+/g,' ').replace(/\s*\n\s*/g,'\n').trim().slice(0,8000)}
+  case 'use_skill':{const s=skills.find(x=>x.on&&x.name.toLowerCase()===String(a.name||'').toLowerCase());
+   return s?s.body.slice(0,12000):'Error: no such skill. Available: '+skills.filter(x=>x.on).map(x=>x.name).join(', ')}
+  case 'save_note':notes.push({t:Date.now(),text:String(a.text||'').slice(0,500)});notes=notes.slice(-100);save('notes',notes);return 'Saved';
+  case 'read_notes':return notes.length?notes.map(n=>'- '+n.text).join('\n'):'No notes';
+  default:return 'Error: unknown tool '+name;
+ }}catch(e){return 'Error: '+e.message}
+}
+function sysPrompt(){
+ let s=cfg.sys+'\n\nCurrent time: '+new Date().toString();
+ const on=skills.filter(x=>x.on);
+ if(on.length)s+='\n\nInstalled skills (load with use_skill):\n'+on.map(x=>'- '+x.name+': '+x.description).join('\n');
+ if(notes.length)s+='\n\nSaved notes:\n'+notes.slice(-20).map(n=>'- '+n.text).join('\n');
+ return s;
+}
+
+/* ---- UI ---- */
+const log=$('#log');
+const scroll=()=>{log.scrollTop=log.scrollHeight};
+function bubble(cls,text){const e=document.createElement('div');e.className=cls==='t'?'t':'m '+cls;
+ if(cls==='u'||cls==='t')e.textContent=text;else e.innerHTML=md(text);log.append(e);scroll();return e}
+function renderHist(){log.innerHTML='';
+ hist.forEach(m=>{if(m.role==='user')bubble('u',m.content);
+  else if(m.role==='assistant'){if(m.content)bubble('a',m.content);(m.tool_calls||[]).forEach(c=>bubble('t','🔧 '+c.function.name))}});
+ if(!hist.length)bubble('t','Pick a model in ⚙ settings, then chat. Add skills with the Skills button.')}
+function trim(){hist=hist.slice(-80);while(hist.length&&hist[0].role!=='user')hist.shift()}
+function setBusy(b){busy=b;$('#send').textContent=b?'Stop':'Send'}
+
+async function agent(){
+ setBusy(true);stopped=false;
+ try{
+  for(let s=0;s<cfg.steps;s++){
+   const el=bubble('a','');let content='',calls=[],err=null;
+   const body={model:cfg.model,messages:[{role:'system',content:sysPrompt()},...hist],stream:true};
+   if(!noTools)body.tools=TOOLS;
+   try{
+    await req('POST',base()+'/api/chat',JSON.stringify(body),line=>{
+     if(!line)return;let j;try{j=JSON.parse(line)}catch(e){return}
+     if(j.error){err=j.error;return}
+     const m=j.message||{};
+     if(m.content){content+=m.content;el.innerHTML=md(content);scroll()}
+     if(m.tool_calls)calls.push(...m.tool_calls);
+    });
+   }catch(e){if(!stopped)err=e.message}
+   if(err&&/does not support tools/i.test(err)&&!noTools){noTools=true;el.remove();toast('Model has no tool support: chat only');s--;continue}
+   if(err){el.textContent='⚠ '+err+(/Failed to connect|ECONN|timed out|Unable to resolve|refused/i.test(err)?'\nCheck the Ollama URL in ⚙ (PC needs OLLAMA_HOST=0.0.0.0).':'');break}
+   if(!content&&!calls.length)el.remove();
+   if(content||calls.length){const am={role:'assistant',content};if(calls.length)am.tool_calls=calls;hist.push(am);save('hist',hist)}
+   if(stopped||!calls.length)break;
+   for(const c of calls){
+    if(stopped)break;
+    const name=c.function.name;let a=c.function.arguments;
+    if(typeof a==='string'){try{a=JSON.parse(a)}catch(e){a={}}}
+    bubble('t','🔧 '+name+(a&&Object.keys(a).length?' '+JSON.stringify(a).slice(0,120):''));
+    const r=String(await exec(name,a)).slice(0,12000);
+    hist.push({role:'tool',tool_name:name,content:r});
+   }
+   save('hist',hist);
+   if(s===cfg.steps-1)bubble('t','Step limit reached');
+  }
+ }catch(e){bubble('a','⚠ '+e.message)}
+ finally{trim();save('hist',hist);setBusy(false);scroll()}
+}
+function send(){
+ if(busy){stopped=true;if(curId&&window.Native)Native.cancel(curId);return}
+ const t=$('#in').value.trim();if(!t)return;
+ if(!cfg.model){openPn('set');return toast('Pick a model first')}
+ $('#in').value='';fit();hist.push({role:'user',content:t});save('hist',hist);
+ if(hist.length===1)log.innerHTML='';
+ bubble('u',t);agent();
+}
+const fit=()=>{const t=$('#in');t.style.height='auto';t.style.height=Math.min(t.scrollHeight,120)+'px'};
+
+/* ---- panels ---- */
+const openPn=n=>{$('#pn-'+n).classList.add('on');if(n==='set')fillSet();if(n==='sk')renderSkills()};
+const closePn=n=>$('#pn-'+n).classList.remove('on');
+function fillSet(){$('#c-url').value=cfg.url;$('#c-steps').value=cfg.steps;$('#c-sys').value=cfg.sys;
+ const s=$('#c-model');if(cfg.model&&![...s.options].some(o=>o.value===cfg.model)){s.innerHTML='';s.add(new Option(cfg.model,cfg.model))}s.value=cfg.model}
+async function loadModels(){
+ const old=cfg.url;cfg.url=$('#c-url').value;
+ try{const j=JSON.parse(await req('GET',base()+'/api/tags'));const s=$('#c-model');s.innerHTML='';
+  (j.models||[]).forEach(m=>s.add(new Option(m.name,m.name)));
+  if(!s.options.length)toast('No models. Run: ollama pull llama3.2');
+  else{if(cfg.model&&[...s.options].some(o=>o.value===cfg.model))s.value=cfg.model;toast(s.options.length+' model(s) found')}}
+ catch(e){toast('Cannot reach Ollama: '+e.message);cfg.url=old}
+}
+function saveCfg(){
+ cfg.url=$('#c-url').value.trim()||'http://127.0.0.1:11434';cfg.model=$('#c-model').value;
+ cfg.steps=Math.max(1,Math.min(30,parseInt($('#c-steps').value)||8));cfg.sys=$('#c-sys').value;
+ noTools=false;save('cfg',cfg);closePn('set');toast('Saved');
+}
+
+$('#send').onclick=send;$('#in').oninput=fit;
+$('#bset').onclick=()=>openPn('set');$('#bsk').onclick=()=>openPn('sk');
+$('#bclr').onclick=()=>{if(busy)return;hist=[];save('hist',hist);noTools=false;renderHist()};
+$('#c-ref').onclick=loadModels;$('#c-save').onclick=saveCfg;$('#c-close').onclick=()=>closePn('set');
+$('#s-add').onclick=addUrl;$('#s-upd').onclick=updAll;$('#s-close').onclick=()=>closePn('sk');
+$('#s-paste').onclick=()=>{const t=$('#s-txt').value.trim();if(!t)return;upsert(parseSkill(t,''));$('#s-txt').value='';toast('Skill added')};
+renderHist();renderSkills();
+if(!cfg.model)setTimeout(()=>openPn('set'),300);
+</script></body></html>
